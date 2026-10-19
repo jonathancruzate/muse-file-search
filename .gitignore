@@ -1,0 +1,4 @@
+hidden_files/
+__pycache__/
+*.tmp
+publish/
