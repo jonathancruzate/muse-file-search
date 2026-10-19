@@ -1,6 +1,6 @@
-# Universal cached file + email search (zero-token)
+# File search for Muse — zero-token universal cached search
 
-One fast search across all your file surfaces, built on prebuilt
+A Muse agent skill: one fast search across all your file surfaces, built on prebuilt
 local indexes. Searching is a deterministic script over cached JSONL files:
 **no model calls, no network, no tokens** in warm search (about a second).
 This is the first stop for any "find a file" or "find an email" request.
