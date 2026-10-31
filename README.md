@@ -87,3 +87,10 @@ manifest with the reason, and the rest still build.
 - OneDrive freshness rides the connector inventory's own refresh cadence.
 - Warm search is ~1 s; the first (cold) build takes several minutes,
   dominated by Gmail.
+
+## Install it with Muse
+
+Just give this prompt to your Muse:
+
+> "Install Muse File Search from https://github.com/jonathancruzate/muse-file-search — read the README, install it, set it up for me, and show me how to use it."
+
