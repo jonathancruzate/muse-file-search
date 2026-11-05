@@ -2,8 +2,9 @@
 """build_index.py — build the cached JSONL indexes for the universal search.
 
 Surfaces: local files, Google Drive (rclone), OneDrive (connector inventory),
-Dropbox (connector), Google Keep (titles only), email headers (Gmail /
-Outlook / agent mailbox). Read-only against every cloud surface.
+Dropbox (connector), Google Keep (titles only), Google Photos (connector
+timeline crawl, metadata only), email headers (Gmail / Outlook / agent
+mailbox). Read-only against every cloud surface.
 Email is HEADERS/METADATA ONLY — no message bodies are ever indexed.
 Zero-token: deterministic script, no model calls.
 """
@@ -22,6 +23,12 @@ OUTLOOK = "/opt/hatch/bin/outlook-mail"
 KEEP = os.path.expanduser("~/workspace/skills/google-keep/bin/keep")
 ONEDRIVE_CLI = os.path.expanduser("~/workspace/skills/onedrive/bin/onedrive.py")
 AGENT_MAIL = os.path.expanduser("~/workspace/custom-skills/local-agent-mail/bin/agent-mail")
+PHOTOS_CONNECTOR_DIR = os.environ.get(
+    "GOOGLE_PHOTOS_CONNECTOR_DIR",
+    os.path.expanduser("~/workspace/custom-connectors/custom.google-photos"))
+PHOTOS_CRAWL = os.path.join(HERE, "photos_crawl.py")
+PHOTOS_FRESH_CAP = int(os.environ.get("MUSE_FILE_SEARCH_PHOTOS_FRESH_CAP", "1000"))
+PHOTOS_BACKFILL_CAP = int(os.environ.get("MUSE_FILE_SEARCH_PHOTOS_BACKFILL_CAP", "1000"))
 OD_INV_DIR = os.path.expanduser("~/workspace/onedrive-cleanup/hidden_files")
 LOCAL_ROOTS = [os.path.expanduser(p) for p in
                ("~/workspace", "~/memory", "~/dreams", "~/hooks")]
@@ -232,6 +239,39 @@ def build_keep():
         records.append(rec("keep", title, "Google Keep", None,
                            parse_date(n.get("updated")), n.get("id")))
     return records, {}
+
+
+# ---------------- google photos ----------------
+
+def build_photos():
+    """Incremental Google Photos metadata index via photos_crawl.py, which
+    runs under the connector's venv python and holds one MCP session open
+    (pagination cursors live only inside a single server process).
+    The helper writes photos.jsonl atomically itself; on failure the
+    previous index stays in place. Returns (None, info)."""
+    venv_python = os.path.join(PHOTOS_CONNECTOR_DIR, "venv", "bin", "python")
+    session_meta = os.path.join(PHOTOS_CONNECTOR_DIR, "session", "meta.json")
+    if not os.path.exists(venv_python):
+        raise RuntimeError(f"google photos connector venv not found at {venv_python}")
+    if not os.path.exists(session_meta):
+        raise RuntimeError("google photos session snapshot missing; run: photos auth refresh")
+    rc, out, err = run([venv_python, PHOTOS_CRAWL,
+                        "--connector-dir", PHOTOS_CONNECTOR_DIR,
+                        "--index", os.path.join(OUT, "photos.jsonl"),
+                        "--state", os.path.join(OUT, "photos-state.json"),
+                        "--fresh-cap", str(PHOTOS_FRESH_CAP),
+                        "--backfill-cap", str(PHOTOS_BACKFILL_CAP)],
+                       timeout=1800)
+    if rc != 0:
+        raise RuntimeError(f"photos crawl failed: {(err or out)[:300]}")
+    stats = json.loads(out.strip().splitlines()[-1])
+    info = {"count": stats["count"], "complete": stats["complete"],
+            "earliest": stats.get("earliest"), "latest": stats.get("latest"),
+            "added_fresh": stats.get("added_fresh"),
+            "added_backfill": stats.get("added_backfill"),
+            "note": "metadata only (filename/description/place); "
+                    "archive and partner-shared items not covered"}
+    return None, info
 
 
 # ---------------- email ----------------
@@ -466,16 +506,20 @@ def main():
     manifest = {"built_at": now_iso(), "surfaces": {}, "unavailable": []}
     builders = (("local", build_local), ("drive", build_drive),
                 ("onedrive", build_onedrive), ("dropbox", build_dropbox),
-                ("keep", build_keep))
+                ("keep", build_keep), ("photos", build_photos))
     for name, fn in builders:
         t0 = time.time()
         try:
             records, info = fn()
-            write_jsonl(f"{name}.jsonl", records)
-            manifest["surfaces"][name] = {"count": len(records),
+            if records is not None:
+                write_jsonl(f"{name}.jsonl", records)
+                count = len(records)
+            else:  # builder wrote its own index file (photos crawl)
+                count = info.pop("count")
+            manifest["surfaces"][name] = {"count": count,
                                           "seconds": round(time.time() - t0, 1),
                                           "status": "ok", **info}
-            print(f"{name}: {len(records)} records in {time.time()-t0:.1f}s",
+            print(f"{name}: {count} records in {time.time()-t0:.1f}s",
                   flush=True)
         except Exception as e:
             manifest["surfaces"][name] = {"count": 0,

@@ -14,6 +14,7 @@ This is the first stop for any "find a file" or "find an email" request.
 | OneDrive | `hidden_files/onedrive.jsonl` | the OneDrive connector inventory (`onedrive-cleanup` delta inventory JSON); manifest records which inventory file and its age |
 | Dropbox | `hidden_files/dropbox.jsonl` | Dropbox connector `list_folder` (recursive, cursor-paginated) |
 | Google Keep | `hidden_files/keep.jsonl` | `keep list`, titles + IDs only (note bodies are never indexed) |
+| Google Photos | `hidden_files/photos.jsonl` | the Google Photos connector (`google-photos-mcp` lane): an incremental timeline crawl in one MCP session — newest-first, then backfilling older items each build until coverage is complete. Metadata only (filename, description, place, taken date, type) with the `photos.google.com` link; the manifest records the coverage window and whether the crawl is complete. Archive and partner-shared items are not covered |
 | Email | `hidden_files/email.jsonl` | Gmail + Outlook + the agent mailbox, **headers/metadata only** (see below) |
 
 `hidden_files/manifest.json` records per-surface record counts, build
@@ -40,6 +41,7 @@ manifest with the reason, and the rest still build.
 ~/workspace/file-search/find-file.sh "Tax Return"
 ~/workspace/file-search/find-file.sh "invoice" --regex
 ~/workspace/file-search/find-file.sh "PSEG" --live     # live CLI/connector fallback
+~/workspace/file-search/find-file.sh "beach sunset" --photos  # + live Google Photos semantic search
 ~/workspace/file-search/find-file.sh "standup" --content  # also rg local file contents
 ```
 
@@ -56,7 +58,10 @@ manifest with the reason, and the rest still build.
   marked LIVE: local `rg --files`, Drive via the Drive API name search
   (gws CLI; an `rclone lsf --include` full-tree scan is the last-resort
   fallback and takes minutes at this Drive's size), OneDrive via the
-  connector's `search`.
+  connector's `search`, and Google Photos via the connector's semantic
+  search. `--photos` runs just the live Google Photos search alongside the
+  cached results — Google Photos' own search understands people, places,
+  things, dates, and text in images, which a filename index cannot.
 
 ## Email cache design
 
@@ -77,8 +82,15 @@ manifest with the reason, and the rest still build.
 
 ## Limitations
 
-- **Google Photos is out of scope**: it is browser-only, with no CLI/API,
-  so it never joins this search.
+- **Google Photos coverage grows incrementally**: the cached index starts
+  with the newest 1,000 items and backfills about 1,000 more on each
+  nightly build until the timeline is fully covered (caps are tunable via
+  `MUSE_FILE_SEARCH_PHOTOS_FRESH_CAP` / `MUSE_FILE_SEARCH_PHOTOS_BACKFILL_CAP`).
+  The cached index matches filename, description, and place; for
+  full-library semantic search use `--photos` or `--live`. The connector
+  lane needs a valid Google Photos session snapshot — if it is missing or
+  expired, the surface is marked unavailable in the manifest and the rest
+  still build.
 - Cloud content search is out of scope: cloud surfaces match on name/path
   (email: headers) only. Local file *contents* are searchable with
   `--content`.

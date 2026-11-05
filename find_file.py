@@ -2,19 +2,27 @@
 """find_file.py — zero-token universal cached search over your file surfaces.
 
 Searches prebuilt JSONL indexes in hidden_files/ (local, Google Drive,
-OneDrive, Dropbox, Google Keep, email headers). No model calls, no network
-in warm mode. --live adds CLI/connector fallbacks on a miss.
+OneDrive, Dropbox, Google Keep, Google Photos metadata, email headers).
+No model calls, no network in warm mode. --live adds CLI/connector
+fallbacks on a miss; --photos always adds a live Google Photos semantic
+search (people, places, things, dates, text in images).
 """
 import argparse, json, os, re, subprocess, sys, time
 from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDX = os.path.join(HERE, "hidden_files")
-SURFACE_ORDER = ["local", "drive", "onedrive", "dropbox", "keep", "email"]
+SURFACE_ORDER = ["local", "drive", "onedrive", "dropbox", "keep", "photos", "email"]
 SURFACE_TITLES = {
     "local": "LOCAL", "drive": "GOOGLE DRIVE", "onedrive": "ONEDRIVE",
-    "dropbox": "DROPBOX", "keep": "GOOGLE KEEP", "email": "EMAIL",
+    "dropbox": "DROPBOX", "keep": "GOOGLE KEEP", "photos": "GOOGLE PHOTOS",
+    "email": "EMAIL",
 }
+PHOTOS_CONNECTOR_DIR = os.environ.get(
+    "GOOGLE_PHOTOS_CONNECTOR_DIR",
+    os.path.expanduser("~/workspace/custom-connectors/custom.google-photos"))
+PHOTOS_CLI = os.environ.get(
+    "GOOGLE_PHOTOS_CLI", os.path.join(PHOTOS_CONNECTOR_DIR, "bin", "photos"))
 LOCAL_ROOTS = [os.path.expanduser(p) for p in
                ("~/workspace", "~/memory", "~/dreams", "~/hooks")]
 REGEX_HINT = set("[]()*+?^$|{}")  # '.' alone stays a literal substring
@@ -83,6 +91,9 @@ def haystack(rec):
     if rec.get("surface") == "email":
         parts += [rec.get("from") or "", rec.get("to") or "",
                   rec.get("snippet") or "", " ".join(rec.get("attachments") or [])]
+    if rec.get("surface") == "photos":
+        parts += [rec.get("description") or "", rec.get("place") or "",
+                  rec.get("media_type") or ""]
     return " ".join(parts).lower()
 
 
@@ -237,10 +248,40 @@ def live_onedrive(query):
     return out
 
 
+def live_photos(query, limit=20):
+    """Live Google Photos semantic search through the connector CLI —
+    Google Photos' own search: people, places, things, dates, text in
+    images. Returns [] when the connector/session is unavailable."""
+    out = []
+    if not os.path.exists(PHOTOS_CLI):
+        return out
+    try:
+        p = subprocess.run([PHOTOS_CLI, "search", query, "--limit", str(limit),
+                            "--details"],
+                           capture_output=True, text=True, timeout=240)
+        d = json.loads(p.stdout)
+    except Exception:
+        return out
+    for it in d.get("items", []):
+        path_bits = ["Google Photos"]
+        if it.get("place"):
+            path_bits.append(it["place"])
+        if it.get("description"):
+            path_bits.append(it["description"])
+        out.append({"surface": "photos",
+                    "name": it.get("filename") or it.get("description") or "(untitled photo)",
+                    "path": " · ".join(path_bits), "size": None,
+                    "modified": it.get("taken_at"), "id": it.get("id"),
+                    "link": it.get("url"), "description": it.get("description"),
+                    "place": it.get("place"), "media_type": it.get("type"),
+                    "live": True})
+    return out
+
+
 def live_all(query):
     grouped = {}
     for fn, surf in ((live_local, "local"), (live_drive, "drive"),
-                     (live_onedrive, "onedrive")):
+                     (live_onedrive, "onedrive"), (live_photos, "photos")):
         try:
             hits = fn(query)
         except Exception as e:  # live fallback is best-effort
@@ -293,6 +334,8 @@ def main():
     ap.add_argument("query")
     ap.add_argument("--live", action="store_true",
                     help="also run live CLI/connector fallbacks and merge")
+    ap.add_argument("--photos", action="store_true",
+                    help="also run a live Google Photos semantic search and merge")
     ap.add_argument("--regex", action="store_true", help="treat query as regex")
     ap.add_argument("--content", action="store_true",
                     help="also search local text-file contents with rg")
@@ -307,14 +350,25 @@ def main():
     if a.live or total == 0:
         live = live_all(a.query)
         for surf, hits in live.items():
+            if surf == "photos":  # don't duplicate cached photo hits
+                seen = {r.get("id") for r in grouped.get("photos", [])}
+                hits = [h for h in hits if h.get("id") not in seen]
             grouped.setdefault(surf, []).extend(hits)
             total += len(hits)
         if live:
             print("(live fallback results merged, marked LIVE)")
+    elif a.photos:
+        hits = live_photos(a.query, a.limit)
+        seen = {r.get("id") for r in grouped.get("photos", [])}
+        hits = [h for h in hits if h.get("id") not in seen]
+        if hits:
+            grouped.setdefault("photos", []).extend(hits)
+            total += len(hits)
+            print("(live Google Photos results merged, marked LIVE)")
 
     if total == 0 and not a.content:
         print(f'No matches for "{a.query}" across local, Drive, OneDrive, '
-              f'Dropbox, Keep, email indexes.')
+              f'Dropbox, Keep, Photos, email indexes.')
         return
 
     for surf in SURFACE_ORDER:
